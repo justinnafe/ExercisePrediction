@@ -1,0 +1,154 @@
+---
+title: "Exercise Movement Prediction"
+author: "Justin Nafe"
+date: "Sunday, April 19, 2015"
+output: html_document
+---
+
+#Executive Summary
+
+This analysis predicts whether the user of accelerator is doing an exercise correctly or not. The column we are predicting is "classe", which contains characters instead of continuous values, so the error measure or performance will be the accuracy of the predictions instead of the root mean square error (RMSE). We attempt to maximize the accuracy of the predictions.
+
+I was able to get the highest accuracy using a random forest model using 50 folds with cross validation. The results yielded an accuracy of 0.988, which predicted the test set correctly.
+
+All code to reproduce these results is within the projectAnalysis.Rmd file.
+
+#Exploratory Analysis
+
+I loaded in the training set and the test set, combined the two into one set keeping track of observations in the test set versus the training set. This allows me to convert numerical columns to factors and ensure that the training is aware of all possible factors in the case where factors in the test set are unknown in the training set. We did not have to worry about that in this analysis, but it makes the dataset easier to work with if I have to normalize a column.
+
+The following is the summary of the training set. To save space, I only show summaries of the first 20 columns.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(caret)
+library(ggplot2)
+
+train <- read.csv("data/pml-training.csv", na.strings = "NA", strip.white = TRUE)
+test <- read.csv("data/pml-testing.csv", na.strings = "NA", strip.white = TRUE)
+
+n.train <- nrow(train)
+
+# Remove problem_id from test set for now
+problemIds <- test$problem_id
+test <- test[,-grep("problem_id", colnames(test))]
+
+# Add classe to test as a placeholder
+test$classe <- "A"
+fullset <- rbind(train, test)
+summary(train)[,1:20]
+```
+
+The summary shows a lot of room for cleanup with divide by zero, `NA` values, and blank values. There are so many `NA` values in the columns starting with "std", "var", etc... because those columns are meant to summarize the exercise window. The summary data is collected when one window ends and a new one begins, or when the "new_window" column contains "yes".
+
+Looks like those values are set when the window is new = "yes"
+
+I am going to assume that the columns starting with "avg", "std", "var", "max", "min", "kurtosis", "skewness" are useless for our prediction. I will remove columns that have a high rate of `NA` or blank values.
+
+The following is the summary of the training set after removing columns with a high rate of `NA` or blank values. To save space, I only show summaries of the first 20 columns.
+
+```{r}
+getColumnsWithHighUnknown <- function(dataset, thresh){
+  results <- 1:dim(dataset)[2]
+  nrows <- dim(dataset)[1]
+  for(i in 1:dim(dataset)[2]){
+    nas <- sum(is.na(dataset[,i]))
+    blanks <- sum(dataset[,i] == "")
+    
+    if((nas/nrows >= thresh || blanks/nrows >= thresh)){
+      results[i] <- i
+    }
+    else{
+      results[i] <- 0
+    }
+  }
+  results <- results[results > 0]
+  results
+}
+removeCols <- getColumnsWithHighUnknown(train, 0.5)
+fullset <- fullset[,-removeCols]
+
+summary(fullset)[,1:20]
+
+```
+
+Removing the summary data seemed to get rid of all the `NA` values.
+
+I'll start the cleanup by seeing what columns if any won't contribute to the prediction by using nearZeroVar for numerical columns
+
+```{r}
+getNumericColumns <- function(dataset){
+  results <- 1:dim(dataset)[2]
+  for(i in 1:dim(dataset)[2]){
+    if(class(dataset[,i]) == "integer" || class(dataset[,i]) == "numeric"){
+      results[i] <- i
+    }
+    else{
+      results[i] <- 0
+    }
+  }
+  results <- results[results > 0]
+  results
+}
+numericCols <- getNumericColumns(fullset)
+temp <- nearZeroVar(fullset[1:n.train,numericCols])
+temp
+```
+
+No numeric columns have a near zero variance after having removed the columns high in `NA`'s.
+
+For factor columns, let us see if the factors contribute to the prediction. We will look at the New Window and User Name columns. 
+
+```{r}
+temp <- fullset[1:n.train,]
+counts <- table(temp$new_window, temp$classe)
+barplot(counts, main="New Window by Classe",
+  xlab="Classe", col=c("darkblue","red"),
+   legend = rownames(counts), beside=TRUE)
+counts <- table(temp$user_name, temp$classe)
+barplot(counts, main="User Name by Classe",
+  xlab="Classe", 
+   legend = rownames(counts), beside=TRUE)
+
+fullset <- fullset[,-grep("new_window", colnames(fullset))]
+```
+
+The factor columns provides some variance, so they may contribute. I used trial and error removing one at a time and the combinations to increase accuracy. I maximized accuracy with cross validation removing New Window and leaving in User Name. 
+
+#Model
+
+Let's build the model that will be used to predict the classe. We will normalize and reduce skewness of the numeric data using "center" and "scale" settings and use Principle Component Analysis (PCA) for the reduction of features by combining highly correlated features so as to not lose any information.
+
+Random forest does a form or cross validation with resampling int he process of building the tree. Instead of the default resampling method of cross validation, I use fold to see how the Accuracy varies. Using the default cross validation of resampling, the Accuracy was lower than using folds.
+
+
+```{r message=FALSE, warning=FALSE }
+set.seed(8947)
+tgrid <- expand.grid(mtry=c(2))
+model <- train(classe~., 
+               data=fullset[1:n.train,-1], 
+               preProcess = c("center", "scale", "pca"), 
+               method = "rf",
+               trControl = trainControl(method = "cv", number = 50),
+               tuneGrid = tgrid)
+model
+```
+
+Using "cv" for cross validation, with a higher number of folds (50) for the large number of features, yielded an Accuracy 0.99 for the "out of sample" estimate.
+
+#Prediction
+
+Using the model we created in the previous section, we predict the "classe" of the test set.
+
+```{r}
+prediction <- predict(model, fullset[-c(1:n.train), -1])
+```
+
+For each problem in the test set, this model predicts the following:
+
+```{r echo=FALSE}
+results <- as.data.frame(cbind(problemIds, as.character(prediction)))
+colnames(results) <- c("Problem", "Result")
+results
+```
+
+
